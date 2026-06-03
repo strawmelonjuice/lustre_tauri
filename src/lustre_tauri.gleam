@@ -1,6 +1,7 @@
-import gleam/dynamic.{type Decoder, type Dynamic}
+import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
 import gleam/javascript/promise.{type Promise}
-import gleam/result
+import gleam/json
 import lustre/effect.{type Effect}
 
 // TYPES ---------------------------------------------------------------------
@@ -12,14 +13,20 @@ pub type TauriError {
 
   /// Returned when the response from a Tauri command cannot be decoded into
   /// the expected Gleam type
-  DecodeError(List(dynamic.DecodeError))
+  DecodeError(List(decode.DecodeError))
+  /// Json parsing ran into an unexpected end of input.
+  JsonUnexpectedEndOfInput
+  /// Json parsing ran into an unexpected byte.
+  JsonUnexpectedByte(String)
+  /// Json parsing ran into an unexpected sequence.
+  JsonUnexpectedSequence(String)
 }
 
 /// Defines how to handle the response from a Tauri command and convert it into
 /// a message for your application. You typically won't need to create this
 /// directly - instead use helpers like `expect_json` or `expect_text`.
-pub opaque type Expect(msg) {
-  Expect(run: fn(Result(Dynamic, String)) -> msg)
+pub opaque type Expect(message) {
+  Expect(run: fn(Result(Dynamic, String)) -> message)
 }
 
 // COMMANDS -----------------------------------------------------------------
@@ -46,8 +53,8 @@ pub opaque type Expect(msg) {
 pub fn invoke(
   command: String,
   args: List(#(String, a)),
-  expect: Expect(msg),
-) -> Effect(msg) {
+  expect: Expect(message),
+) -> Effect(message) {
   effect.from(fn(dispatch) {
     do_invoke(command, args)
     |> promise.map(expect.run)
@@ -68,29 +75,31 @@ fn do_invoke(
 /// its response data. Perfect for fire-and-forget operations like saving files
 /// or updating settings.
 pub fn expect_anything(
-  to_msg: fn(Result(Nil, TauriError)) -> msg,
-) -> Expect(msg) {
+  handler: fn(Result(Nil, TauriError)) -> message,
+) -> Expect(message) {
   Expect(fn(response) {
     response
     |> result.map_error(InvokeError)
     |> result.replace(Nil)
-    |> to_msg
+    |> handler
   })
 }
 
 /// Handle commands that return text responses, such as reading file contents
 /// or getting simple string values from your Tauri backend.
-pub fn expect_text(to_msg: fn(Result(String, TauriError)) -> msg) -> Expect(msg) {
+pub fn expect_text(
+  handler: fn(Result(String, TauriError)) -> message,
+) -> Expect(message) {
   Expect(fn(response) {
     response
     |> result.map_error(InvokeError)
-    |> result.then(fn(value) {
-      case dynamic.string(value) {
+    |> result.try(fn(value) {
+      case decode.run(value, decode.string) {
         Ok(text) -> Ok(text)
         Error(errs) -> Error(DecodeError(errs))
       }
     })
-    |> to_msg
+    |> handler
   })
 }
 
@@ -116,18 +125,27 @@ pub fn expect_text(to_msg: fn(Result(String, TauriError)) -> msg) -> Expect(msg)
 /// }
 /// ```
 pub fn expect_json(
-  decoder: Decoder(a),
-  to_msg: fn(Result(a, TauriError)) -> msg,
-) -> Expect(msg) {
+  decoder: decode.Decoder(a),
+  handler: fn(Result(a, TauriError)) -> message,
+) -> Expect(message) {
   Expect(fn(response) {
     response
     |> result.map_error(InvokeError)
-    |> result.then(fn(value) {
-      case decoder(value) {
-        Ok(decoded) -> Ok(decoded)
-        Error(errs) -> Error(DecodeError(errs))
+    |> result.try(fn(dyn) {
+      case decode.run(dyn, decode.string) {
+        Ok(json_str) ->
+          json.parse(json_str, decoder)
+          |> result.map_error(fn(error) {
+            case error {
+              json.UnexpectedEndOfInput -> JsonUnexpectedEndOfInput
+              json.UnexpectedByte(byte) -> JsonUnexpectedByte(byte)
+              json.UnexpectedSequence(seq) -> JsonUnexpectedSequence(seq)
+              json.UnableToDecode(decode_errors) -> DecodeError(decode_errors)
+            }
+          })
+        Error(decode_errors) -> Error(DecodeError(decode_errors))
       }
     })
-    |> to_msg
+    |> handler
   })
 }
