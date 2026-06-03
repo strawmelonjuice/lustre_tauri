@@ -2,6 +2,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/javascript/promise.{type Promise}
 import gleam/json
+import gleam/result
 import lustre/effect.{type Effect}
 
 // TYPES ---------------------------------------------------------------------
